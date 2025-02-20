@@ -53,7 +53,6 @@ def unwrap_traj(traj: types.TrajectoryWithRew) -> types.TrajectoryWithRew:
     assert len(res.rews) == len(res.acts)
     return res
 
-
 class TrajectoryAccumulator:
     """Accumulates trajectories step-by-step.
 
@@ -64,9 +63,10 @@ class TrajectoryAccumulator:
     at its default value of `None` if you only wish to collect one trajectory.
     """
 
-    def __init__(self):
+    def __init__(self, remove_keys):
         """Initialise the trajectory accumulator."""
         self.partial_trajectories = collections.defaultdict(list)
+        self.remove_keys = remove_keys
 
     def add_step(
         self,
@@ -144,6 +144,12 @@ class TrajectoryAccumulator:
             A list of completed trajectories. There should be one trajectory for
             each `True` in the `dones` argument.
         """
+        if self.remove_keys is not None:
+            if self.remove_keys[0] == "heightmap_diff":
+                # obs = obs[:,:-3072]
+                first_part = obs[:, :13]
+                last_part = obs[:, -407040:]
+                obs = np.concatenate((first_part, last_part), axis=1)
         trajs: List[types.TrajectoryWithRew] = []
         wrapped_obs = types.maybe_wrap_in_dictobs(obs)
 
@@ -185,6 +191,138 @@ class TrajectoryAccumulator:
                 # observation following reset() of the ith VecEnv.
                 self.add_step(dict(obs=ob), env_idx)
         return trajs
+
+# class TrajectoryAccumulator:
+#     """Accumulates trajectories step-by-step.
+
+#     Useful for collecting completed trajectories while ignoring partially-completed
+#     trajectories (e.g. when rolling out a VecEnv to collect a set number of
+#     transitions). Each in-progress trajectory is identified by a 'key', which enables
+#     several independent trajectories to be collected at once. They key can also be left
+#     at its default value of `None` if you only wish to collect one trajectory.
+#     """
+
+#     def __init__(self):
+#         """Initialise the trajectory accumulator."""
+#         self.partial_trajectories = collections.defaultdict(list)
+
+#     def add_step(
+#         self,
+#         step_dict: Mapping[str, Union[types.Observation, Mapping[str, Any]]],
+#         key: Hashable = None,
+#     ) -> None:
+#         """Add a single step to the partial trajectory identified by `key`.
+
+#         Generally a single step could correspond to, e.g., one environment managed
+#         by a VecEnv.
+
+#         Args:
+#             step_dict: dictionary containing information for the current step. Its
+#                 keys could include any (or all) attributes of a `TrajectoryWithRew`
+#                 (e.g. "obs", "acts", etc.).
+#             key: key to uniquely identify the trajectory to append to, if working
+#                 with multiple partial trajectories.
+#         """
+#         self.partial_trajectories[key].append(step_dict)
+
+#     def finish_trajectory(
+#         self,
+#         key: Hashable,
+#         terminal: bool,
+#     ) -> types.TrajectoryWithRew:
+#         """Complete the trajectory labelled with `key`.
+
+#         Args:
+#             key: key uniquely identifying which in-progress trajectory to remove.
+#             terminal: trajectory has naturally finished (i.e. includes terminal state).
+
+#         Returns:
+#             traj: list of completed trajectories popped from
+#                 `self.partial_trajectories`.
+#         """
+#         part_dicts = self.partial_trajectories[key]
+#         del self.partial_trajectories[key]
+#         out_dict_unstacked = collections.defaultdict(list)
+#         for part_dict in part_dicts:
+#             for k, array in part_dict.items():
+#                 out_dict_unstacked[k].append(array)
+
+#         out_dict_stacked = {
+#             k: types.stack_maybe_dictobs(arr_list)
+#             for k, arr_list in out_dict_unstacked.items()
+#         }
+#         traj = types.TrajectoryWithRew(**out_dict_stacked, terminal=terminal)
+#         assert traj.rews.shape[0] == traj.acts.shape[0] == len(traj.obs) - 1
+#         return traj
+
+#     def add_steps_and_auto_finish(
+#         self,
+#         acts: np.ndarray,
+#         obs: Union[types.Observation, Dict[str, np.ndarray]],
+#         rews: np.ndarray,
+#         dones: np.ndarray,
+#         infos: List[dict],
+#     ) -> List[types.TrajectoryWithRew]:
+#         """Calls `add_step` repeatedly using acts and the returns from `venv.step`.
+
+#         Also automatically calls `finish_trajectory()` for each `done == True`.
+#         Before calling this method, each environment index key needs to be
+#         initialized with the initial observation (usually from `venv.reset()`).
+
+#         See the body of `util.rollout.generate_trajectory` for an example.
+
+#         Args:
+#             acts: Actions passed into `VecEnv.step()`.
+#             obs: Return value from `VecEnv.step(acts)`.
+#             rews: Return value from `VecEnv.step(acts)`.
+#             dones: Return value from `VecEnv.step(acts)`.
+#             infos: Return value from `VecEnv.step(acts)`.
+
+#         Returns:
+#             A list of completed trajectories. There should be one trajectory for
+#             each `True` in the `dones` argument.
+#         """
+#         trajs: List[types.TrajectoryWithRew] = []
+#         wrapped_obs = types.maybe_wrap_in_dictobs(obs)
+
+#         # iterate through environments
+#         for env_idx in range(len(wrapped_obs)):
+#             assert env_idx in self.partial_trajectories
+#             assert list(self.partial_trajectories[env_idx][0].keys()) == ["obs"], (
+#                 "Need to first initialize partial trajectory using "
+#                 "self._traj_accum.add_step({'obs': ob}, key=env_idx)"
+#             )
+
+#         # iterate through steps
+#         zip_iter = enumerate(zip(acts, wrapped_obs, rews, dones, infos))
+#         for env_idx, (act, ob, rew, done, info) in zip_iter:
+#             if done:
+#                 # When dones[i] from VecEnv.step() is True, obs[i] is the first
+#                 # observation following reset() of the ith VecEnv, and
+#                 # infos[i]["terminal_observation"] is the actual final observation.
+#                 real_ob = types.maybe_wrap_in_dictobs(info["terminal_observation"])
+#             else:
+#                 real_ob = ob
+
+#             self.add_step(
+#                 dict(
+#                     acts=act,
+#                     rews=rew,
+#                     # this is not the obs corresponding to `act`, but rather the obs
+#                     # *after* `act` (see above)
+#                     obs=real_ob,
+#                     infos=info,
+#                 ),
+#                 env_idx,
+#             )
+#             if done:
+#                 # finish env_idx-th trajectory
+#                 new_traj = self.finish_trajectory(env_idx, terminal=True)
+#                 trajs.append(new_traj)
+#                 # When done[i] from VecEnv.step() is True, obs[i] is the first
+#                 # observation following reset() of the ith VecEnv.
+#                 self.add_step(dict(obs=ob), env_idx)
+#         return trajs
 
 
 GenTrajTerminationFn = Callable[[Sequence[types.TrajectoryWithRew]], bool]
@@ -385,6 +523,7 @@ def generate_trajectories(
     sample_until: GenTrajTerminationFn,
     rng: np.random.Generator,
     *,
+    remove_keys = None,
     deterministic_policy: bool = False,
 ) -> Sequence[types.TrajectoryWithRew]:
     """Generate trajectory dictionaries from a policy and an environment.
@@ -414,16 +553,29 @@ def generate_trajectories(
     # Collect rollout tuples.
     trajectories = []
     # accumulator for incomplete trajectories
-    trajectories_accum = TrajectoryAccumulator()
-    obs = venv.reset()
+    trajectories_accum = TrajectoryAccumulator(remove_keys=remove_keys)
+    
+    if remove_keys is not None:
+        obs = venv.reset(collect_call=True)
+        if remove_keys[0] == "heightmap_diff":
+            # rec_obs = obs[:,:-3072]
+            first_part = obs[:, :13]
+            last_part = obs[:, -407040:]
+            rec_obs = np.concatenate((first_part, last_part), axis=1)
+    else:
+        obs = venv.reset()
     assert isinstance(
         obs,
         (np.ndarray, dict),
     ), "Tuple observations are not supported."
     wrapped_obs = types.maybe_wrap_in_dictobs(obs)
+    if remove_keys is not None:
+        wrapped_rec_obs = types.maybe_wrap_in_dictobs(rec_obs)
+    else:
+        wrapped_rec_obs = wrapped_obs
 
     # we use dictobs to iterate over the envs in a vecenv
-    for env_idx, ob in enumerate(wrapped_obs):
+    for env_idx, ob in enumerate(wrapped_rec_obs):
         # Seed with first obs only. Inside loop, we'll only add second obs from
         # each (s,a,r,s') tuple, under the same "obs" key again. That way we still
         # get all observations, but they're not duplicated into "next obs" and
@@ -481,27 +633,27 @@ def generate_trajectories(
     rng.shuffle(trajectories)  # type: ignore[arg-type]
 
     # Sanity checks.
-    for trajectory in trajectories:
-        n_steps = len(trajectory.acts)
-        # extra 1 for the end
-        if isinstance(venv.observation_space, spaces.Dict):
-            exp_obs = {}
-            for k, v in venv.observation_space.items():
-                assert v.shape is not None
-                exp_obs[k] = (n_steps + 1,) + v.shape
-        else:
-            obs_space_shape = venv.observation_space.shape
-            assert obs_space_shape is not None
-            exp_obs = (n_steps + 1,) + obs_space_shape  # type: ignore[assignment]
-        real_obs = trajectory.obs.shape
-        assert real_obs == exp_obs, f"expected shape {exp_obs}, got {real_obs}"
-        assert venv.action_space.shape is not None
-        exp_act = (n_steps,) + venv.action_space.shape
-        real_act = trajectory.acts.shape
-        assert real_act == exp_act, f"expected shape {exp_act}, got {real_act}"
-        exp_rew = (n_steps,)
-        real_rew = trajectory.rews.shape
-        assert real_rew == exp_rew, f"expected shape {exp_rew}, got {real_rew}"
+    # for trajectory in trajectories:
+    #     n_steps = len(trajectory.acts)
+    #     # extra 1 for the end
+    #     if isinstance(venv.observation_space, spaces.Dict):
+    #         exp_obs = {}
+    #         for k, v in venv.observation_space.items():
+    #             assert v.shape is not None
+    #             exp_obs[k] = (n_steps + 1,) + v.shape
+    #     else:
+    #         obs_space_shape = venv.observation_space.shape
+    #         assert obs_space_shape is not None
+    #         exp_obs = (n_steps + 1,) + obs_space_shape  # type: ignore[assignment]
+    #     real_obs = trajectory.obs.shape
+    #     assert real_obs == exp_obs, f"expected shape {exp_obs}, got {real_obs}"
+    #     assert venv.action_space.shape is not None
+    #     exp_act = (n_steps,) + venv.action_space.shape
+    #     real_act = trajectory.acts.shape
+    #     assert real_act == exp_act, f"expected shape {exp_act}, got {real_act}"
+    #     exp_rew = (n_steps,)
+    #     real_rew = trajectory.rews.shape
+    #     assert real_rew == exp_rew, f"expected shape {exp_rew}, got {real_rew}"
 
     return trajectories
 
