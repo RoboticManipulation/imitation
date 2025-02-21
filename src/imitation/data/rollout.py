@@ -148,9 +148,11 @@ class TrajectoryAccumulator:
             if self.remove_keys[0] == "heightmap_diff":
                 # obs = obs[:,:-3072]
                 first_part = obs[:, :13]
+                second_part = obs[:, -((2*407040)+1024):-(2*407040)]
                 last_part = obs[:, -(2*407040):]
                 # last_part = obs[:, -407040:]
-                obs = np.concatenate((first_part, last_part), axis=1)
+                # obs = np.concatenate((first_part, last_part), axis=1)
+                obs = np.concatenate((first_part, second_part, last_part), axis=1)
         trajs: List[types.TrajectoryWithRew] = []
         wrapped_obs = types.maybe_wrap_in_dictobs(obs)
 
@@ -561,9 +563,11 @@ def generate_trajectories(
         if remove_keys[0] == "heightmap_diff":
             # rec_obs = obs[:,:-3072]
             first_part = obs[:, :13]
+            second_part = obs[:, -((2*407040)+1024):-(2*407040)]
             last_part = obs[:, -(2*407040):]
             # last_part = obs[:, -407040:]
-            rec_obs = np.concatenate((first_part, last_part), axis=1)
+            # rec_obs = np.concatenate((first_part, last_part), axis=1)
+            rec_obs = np.concatenate((first_part, second_part, last_part), axis=1)
     else:
         obs = venv.reset()
     assert isinstance(
