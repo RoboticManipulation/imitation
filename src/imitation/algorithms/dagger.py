@@ -12,6 +12,7 @@ import os
 import pathlib
 import uuid
 from typing import Any, Callable, List, Mapping, Optional, Sequence, Tuple, Union
+from collections import deque
 
 import numpy as np
 import torch as th
@@ -335,6 +336,8 @@ class DAggerTrainer(base.BaseImitationAlgorithm):
         beta_schedule: Optional[Callable[[int], float]] = None,
         bc_trainer: bc.BC,
         custom_logger: Optional[imit_logger.HierarchicalLogger] = None,
+        demo_window_size = -1,
+        prune_random_demos= False
     ):
         """Builds DAggerTrainer.
 
@@ -358,7 +361,9 @@ class DAggerTrainer(base.BaseImitationAlgorithm):
         self.venv = venv
         self.round_num = 0
         self._last_loaded_round = -1
-        self._all_demos = []
+        self.demo_window_size = demo_window_size
+        self.prune_random_demos = prune_random_demos
+        self._all_demos = deque()
         self.rng = rng
 
         utils.check_for_correct_spaces(
@@ -395,15 +400,83 @@ class DAggerTrainer(base.BaseImitationAlgorithm):
     def batch_size(self) -> int:
         return self.bc_trainer.batch_size
 
+    # def _load_all_demos(self) -> Tuple[types.Transitions, List[int]]:
+    #     num_demos_by_round = []
+    #     for round_num in range(self._last_loaded_round + 1, self.round_num + 1):
+    #         round_dir = self._demo_dir_path_for_round(round_num)
+    #         demo_paths = self._get_demo_paths(round_dir)
+    #         self._all_demos.extend(serialize.load(p)[0] for p in demo_paths)
+    #         num_demos_by_round.append(len(demo_paths))
+    #     logging.info(f"Loaded {len(self._all_demos)} total")
+    #     demo_transitions = rollout.flatten_trajectories(self._all_demos)
+    #     return demo_transitions, num_demos_by_round
+    
+    # def _load_all_demos(self) -> Tuple[types.Transitions, List[int]]:
+    #     num_demos_by_round = []
+    #     # Keep all demos
+    #     if self.demo_window_size < 0:
+    #         start_round = 0
+    #     else:
+    #         # Keep the last self.demo_window_size rounds
+    #         start_round = max(0, self.round_num - (self.demo_window_size-1))
+    #     # Rebuild demos from rounds [start_round, self.round_num]
+    #     self._all_demos = []
+    #     for round_num in range(start_round, self.round_num + 1):
+    #         round_dir = self._demo_dir_path_for_round(round_num)
+    #         demo_paths = self._get_demo_paths(round_dir)
+    #         self._all_demos.extend(serialize.load(p)[0] for p in demo_paths)
+    #         num_demos_by_round.append(len(demo_paths))
+    #     logging.info(f"Loaded {len(self._all_demos)} total demos from rounds {start_round} to {self.round_num}")
+    #     # Update _last_loaded_round to the current round.
+    #     self._last_loaded_round = self.round_num
+    #     demo_transitions = rollout.flatten_trajectories(self._all_demos)
+    #     return demo_transitions, num_demos_by_round
+
     def _load_all_demos(self) -> Tuple[types.Transitions, List[int]]:
         num_demos_by_round = []
+        # Load new demos for rounds from _last_loaded_round + 1 to self.round_num.
         for round_num in range(self._last_loaded_round + 1, self.round_num + 1):
             round_dir = self._demo_dir_path_for_round(round_num)
             demo_paths = self._get_demo_paths(round_dir)
-            self._all_demos.extend(serialize.load(p)[0] for p in demo_paths)
+            for p in demo_paths:
+                demo = serialize.load(p)[0]
+                self._all_demos.append((round_num, demo))
             num_demos_by_round.append(len(demo_paths))
-        logging.info(f"Loaded {len(self._all_demos)} total")
-        demo_transitions = rollout.flatten_trajectories(self._all_demos)
+        
+        # If demo_window_size is at least 1, prune the demo collection to that window.
+        if self.demo_window_size >= 1:
+            # Determine the minimum allowed round for the window.
+            min_allowed_round = max(0, self.round_num - (self.demo_window_size - 1))
+            if not self.prune_random_demos:
+                # Deterministic pruning: remove demos with round numbers below the minimum.
+                while self._all_demos and self._all_demos[0][0] < min_allowed_round:
+                    self._all_demos.popleft()
+            else:
+                # Random pruning: group demos by round.
+                demos_by_round = {}
+                for r, demo in self._all_demos:
+                    demos_by_round.setdefault(r, []).append(demo)
+                # Collect all round numbers in the allowed window.
+                rounds_in_window = [r for r in demos_by_round if r >= min_allowed_round]
+                # If there are more rounds than allowed, sample randomly using self.rng.
+                if len(rounds_in_window) > self.demo_window_size:
+                    rounds_in_window = self.rng.choice(
+                        np.array(rounds_in_window), size=self.demo_window_size, replace=False
+                    ).tolist()
+                # Rebuild the deque with demos only from the selected rounds.
+                new_all_demos = []
+                for r in rounds_in_window:
+                    for demo in demos_by_round[r]:
+                        new_all_demos.append((r, demo))
+                self._all_demos = deque(new_all_demos)
+        
+        logging.info(f"Loaded demos in current window: {len(self._all_demos)} demos")
+        # Flatten the demos (ignoring round numbers) for training.
+        demos = [demo for (_, demo) in self._all_demos]
+        demo_transitions = rollout.flatten_trajectories(demos)
+        
+        # Update the last loaded round.
+        self._last_loaded_round = self.round_num
         return demo_transitions, num_demos_by_round
 
     def _get_demo_paths(self, round_dir: pathlib.Path) -> List[pathlib.Path]:
