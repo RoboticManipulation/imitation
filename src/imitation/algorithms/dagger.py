@@ -9,6 +9,7 @@ policy.
 import abc
 import logging
 import os
+import shutil
 import pathlib
 import uuid
 from typing import Any, Callable, List, Mapping, Optional, Sequence, Tuple, Union
@@ -337,7 +338,8 @@ class DAggerTrainer(base.BaseImitationAlgorithm):
         bc_trainer: bc.BC,
         custom_logger: Optional[imit_logger.HierarchicalLogger] = None,
         demo_window_size = -1,
-        prune_random_demos= False
+        prune_random_demos= False,
+        remove_old_demos_from_disk=True,
     ):
         """Builds DAggerTrainer.
 
@@ -358,6 +360,8 @@ class DAggerTrainer(base.BaseImitationAlgorithm):
             beta_schedule = LinearBetaSchedule(15)
         self.beta_schedule = beta_schedule
         self.scratch_dir = util.parse_path(scratch_dir)
+        self.remove_old_demos_from_disk = remove_old_demos_from_disk
+        self.last_removed_round = 0
         self.venv = venv
         self.round_num = 0
         self._last_loaded_round = -1
@@ -469,7 +473,18 @@ class DAggerTrainer(base.BaseImitationAlgorithm):
                     for demo in demos_by_round[r]:
                         new_all_demos.append((r, demo))
                 self._all_demos = deque(new_all_demos)
-        
+
+            # Remove outdated demo directories from disk.
+            # Instead of iterating over the directory entries, we iterate over all rounds
+            # smaller than min_allowed_round, and remove the corresponding demo directory.
+            if self.remove_old_demos_from_disk:
+                for round_num in range(self.last_removed_round, min_allowed_round):
+                    demo_dir = self._demo_dir_path_for_round(round_num)
+                    if demo_dir.exists():
+                        shutil.rmtree(demo_dir)
+                        logging.info(f"Removed outdated demo directory: {demo_dir}")
+                        self.last_removed_round = round_num
+
         logging.info(f"Loaded demos in current window: {len(self._all_demos)} demos")
         # Flatten the demos (ignoring round numbers) for training.
         demos = [demo for (_, demo) in self._all_demos]
