@@ -340,6 +340,7 @@ class DAggerTrainer(base.BaseImitationAlgorithm):
         demo_window_size = -1,
         prune_random_demos= False,
         remove_old_demos_from_disk=True,
+        beta_rampdown_rounds=15
     ):
         """Builds DAggerTrainer.
 
@@ -355,9 +356,9 @@ class DAggerTrainer(base.BaseImitationAlgorithm):
             custom_logger: Where to log to; if None (default), creates a new logger.
         """
         super().__init__(custom_logger=custom_logger)
-
+        self.beta_rampdown_rounds = beta_rampdown_rounds
         if beta_schedule is None:
-            beta_schedule = LinearBetaSchedule(15)
+            beta_schedule = LinearBetaSchedule(self.beta_rampdown_rounds)
         self.beta_schedule = beta_schedule
         self.scratch_dir = util.parse_path(scratch_dir)
         self.remove_old_demos_from_disk = remove_old_demos_from_disk
